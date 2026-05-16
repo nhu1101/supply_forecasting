@@ -1,4 +1,4 @@
-forecast_env/
+supply_forecast/
 __pycache__/
 *.pyc
 .DS_Store
