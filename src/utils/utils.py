@@ -8,7 +8,7 @@ import json
 
 
 ## Add lag, avm features: 
-def feature_engineering(data):
+def supply_feature_engineering(data):
     df = data.copy()
 
     # convert to datetime
@@ -110,7 +110,7 @@ def split_train_test_time(data, ratio, peak):
     return train_df, test_df
 
 
-def fill_time_template(
+def supply_fill_time_template(
     df,
     min_datetime,
     max_datetime,
@@ -184,3 +184,128 @@ def impute_missing_values(data):
     df_final = df.dropna().reset_index(drop=True)
 
     return df_final 
+
+
+def demand_fill_time_template(
+    df,
+    min_datetime,
+    max_datetime,
+    interval='10min'
+):
+
+    data = df.copy()
+    # Ensure datetime type
+    data['block_start_time'] = pd.to_datetime(data['block_start_time'])
+
+    # Create full 10-minute interval range
+    time_range = pd.DataFrame({
+        'block_start_time': pd.date_range(
+            start=min_datetime,
+            end=max_datetime,
+            freq=interval
+        )
+    })
+
+    # Create unique combinations
+    group_template = data[['hex_id', 'service_id']].drop_duplicates()
+
+    # Cross join
+    group_template['key'] = 1
+    time_range['key'] = 1
+
+    template = pd.merge(group_template,time_range,on='key').drop('key', axis=1)
+
+    # Merge with original data
+    data_merge = pd.merge(template, data,
+        on=[
+            'hex_id',
+            'service_id',
+            'block_start_time'
+        ],
+        how='left'
+    )
+
+    # Fill missing values
+    fill_cols = ['total_demands']
+
+    for col in fill_cols:
+        if col in data_merge.columns:
+            data_merge[col] = data_merge[col].fillna(0)
+
+    return data_merge
+
+
+
+def demand_feature_engineering(data):
+    df = data.copy()
+
+    # convert to datetime
+    df['block_start_time'] = pd.to_datetime(df['block_start_time'])
+
+    df['date'] = df['block_start_time'].dt.date
+
+    # sort (VERY IMPORTANT for lag)
+    df = df.sort_values('block_start_time')
+
+    # ========================
+    # 1. Time-based features
+    # ========================
+
+    df['month'] = df['block_start_time'].dt.month
+    df['weekday'] = df['block_start_time'].dt.weekday   # Monday=0
+    df['hour'] = df['block_start_time'].dt.hour
+
+    # week of month
+    df['week_of_month'] = df['block_start_time'].apply(
+        lambda x: (x.day - 1) // 7 + 1
+    )
+
+    # ========================
+    # 2. Lag features
+    # ========================
+
+    # IMPORTANT: group by date if each day is independent
+    df['lag_1'] = df.groupby(['hex_id','service_id'])['total_demands'].shift(1)
+
+    df['lag_2'] = df.groupby(['hex_id','service_id'])['total_demands'].shift(2)
+    df['lag_3'] = df.groupby(['hex_id','service_id'])['total_demands'].shift(3)
+    df['lag_6'] = df.groupby(['hex_id','service_id'])['total_demands'].shift(6)
+    df['lag_144'] = df.groupby(['hex_id','service_id'])['total_demands'].shift(144)  
+    df['lag_143'] = df.groupby(['hex_id','service_id'])['total_demands'].shift(143) 
+
+
+    df['diff_2'] = df['lag_1'] - df['lag_2']
+
+    df['ma_3'] = (
+        df.groupby(['hex_id','service_id'])['total_demands']
+        .transform(lambda x: x.shift(1).rolling(3).mean())
+    )
+
+    df['ma_6'] = (
+        df.groupby(['hex_id','service_id'])['total_demands']
+        .transform(lambda x: x.shift(1).rolling(6).mean())
+    )
+
+    #detect abnormal spike:
+    df['ratio_to_mean'] = df['lag_1'] / (df['ma_6'] + 1e-5)
+
+    df['std_3'] = df.groupby(['hex_id','service_id'])['total_demands']\
+                    .transform(lambda x: x.shift(1).rolling(3).std())
+
+    df['hour_sin'] = np.sin(2*np.pi*df['hour']/24)
+    df['hour_cos'] = np.cos(2*np.pi*df['hour']/24)
+
+    df['weekday_sin'] = np.sin(2*np.pi*df['weekday']/7)
+    df['weekday_cos'] = np.cos(2*np.pi*df['weekday']/7)
+
+
+    # define peak condition
+    df['is_peak'] = (
+        ((df['hour'] >= 8) & (df['hour'] < 11)) | #add 8AM for capture orders in pre-preak hour 
+        ((df['hour'] >= 13) & (df['hour'] < 15))
+    ).astype(int)
+
+    # df_encode  = pd.get_dummies(df, columns=['vehicle_type'])
+    # df_encode['vehicle_type'] = df['vehicle_type']
+
+    return df
